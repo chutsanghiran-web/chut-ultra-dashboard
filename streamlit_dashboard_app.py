@@ -31,7 +31,7 @@ races["Days to go"] = (races["Date"].dt.date - date.today()).apply(lambda x: x.d
 
 # Sidebar
 st.title("🏔️ Chut's Ultra Trail Command Center")
-st.caption("Phase 2.1 Streamlit prototype: dashboard, training plan status, recovery insights, readiness, countdown, and AI coaching logic.")
+st.caption("Phase 2.2 Streamlit prototype: dashboard, training plan status, recovery insights, readiness, countdown, AI coaching logic, and custom activity colors.")
 st.sidebar.header("Navigation")
 page = st.sidebar.radio("Go to", ["Home", "Training Plan", "Activities", "Recovery", "Race Readiness", "AI Coach"])
 
@@ -124,6 +124,50 @@ def recovery_assessment(sleep_avg, sleep_latest, hrv_avg, hrv_latest, load_lates
 
     return headline, notes, guidelines
 
+def classify_activity(row):
+    sport = str(row.get("sport", ""))
+    name = str(row.get("activity_name", "")).lower()
+    ascent = row.get("ascent_m", 0)
+
+    trail_keywords = [
+        "kc",
+        "khao chalak",
+        "trail",
+        "mountain",
+        "hill",
+        "hike",
+        "climb",
+        "ascent",
+        "descent"
+    ]
+
+    # KC / trail detection:
+    # 1. Activity name contains trail keywords
+    # 2. Or it is a run with large elevation gain
+    if any(k in name for k in trail_keywords):
+        return "KC/Trail"
+
+    try:
+        if "run" in sport.lower() and float(ascent) >= 300:
+            return "KC/Trail"
+    except (TypeError, ValueError):
+        pass
+
+    if "cycl" in sport.lower():
+        return "Cycling"
+
+    if "swim" in sport.lower():
+        return "Swimming"
+
+    return "Running"
+
+SPORT_COLORS = {
+    "Running": "#2ECC71",     # green
+    "Cycling": "#FF69B4",     # pink
+    "Swimming": "#FFD700",    # yellow
+    "KC/Trail": "#8E44AD"     # purple
+}
+
 sleep_latest = latest_non_null(sleep, "sleep_hours")
 sleep_avg7 = mean_last(sleep, "sleep_hours", 7)
 sleep_score_avg7 = mean_last(sleep, "sleep_score", 7)
@@ -152,8 +196,27 @@ if page == "Home":
 
     st.subheader("3. June Training Mix")
     if not activities.empty:
-        sport_summary = activities.groupby("sport", as_index=False).agg(distance_km=("distance_km", "sum"), duration_min=("duration_min", "sum"))
-        fig = px.bar(sport_summary, x="sport", y="distance_km", text="distance_km", title="Distance by sport")
+        activities_home = activities.copy()
+        activities_home["activity_group"] = activities_home.apply(classify_activity, axis=1)
+        sport_summary = activities_home.groupby("activity_group", as_index=False).agg(
+            distance_km=("distance_km", "sum"),
+            duration_min=("duration_min", "sum")
+        )
+        fig = px.bar(
+            sport_summary,
+            x="activity_group",
+            y="distance_km",
+            text="distance_km",
+            title="Distance by activity type",
+            color="activity_group",
+            color_discrete_map=SPORT_COLORS
+        )
+        fig.update_layout(
+            legend_title_text="Activity",
+            xaxis_title="Activity",
+            yaxis_title="Distance (km)",
+            plot_bgcolor="rgba(0,0,0,0)"
+        )
         st.plotly_chart(fig, use_container_width=True)
 
 elif page == "Training Plan":
@@ -177,9 +240,35 @@ elif page == "Training Plan":
 elif page == "Activities":
     st.header("Garmin Activities")
     if not activities.empty:
-        fig = px.scatter(activities, x="date", y="distance_km", size="duration_min", color="sport", hover_data=["avg_hr", "ascent_m", "avg_pace_min_km"])
+        activities_plot = activities.copy()
+        activities_plot["activity_group"] = activities_plot.apply(classify_activity, axis=1)
+
+        fig = px.scatter(
+            activities_plot,
+            x="date",
+            y="distance_km",
+            size="duration_min",
+            color="activity_group",
+            color_discrete_map=SPORT_COLORS,
+            hover_data=[
+                "sport",
+                "avg_hr",
+                "ascent_m",
+                "avg_pace_min_km"
+            ],
+            title="Activities by Distance and Duration"
+        )
+
+        fig.update_layout(
+            legend_title_text="Activity",
+            xaxis_title="Date",
+            yaxis_title="Distance (km)",
+            plot_bgcolor="rgba(0,0,0,0)"
+        )
+
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(activities, use_container_width=True)
+        st.caption("KC/Trail is detected from activity name keywords or high-elevation runs over 300m ascent.")
+        st.dataframe(activities_plot, use_container_width=True)
 
 elif page == "Recovery":
     st.header("Recovery: AI Insight + Guidelines")
