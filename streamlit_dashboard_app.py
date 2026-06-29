@@ -15,10 +15,23 @@ def load_data():
         load = pd.read_csv("garmin_training_load_june_parsed.csv", parse_dates=["date"])
     except FileNotFoundError:
         load = pd.DataFrame(columns=["date", "acute_load", "chronic_load", "acwr", "load_status", "load_percent"])
-    return activities, plan, health, sleep, load
 
-activities, plan, health, sleep, load = load_data()
+    try:
+        dynamics = pd.read_csv("running_dynamics_parsed.csv", parse_dates=["date"])
+    except FileNotFoundError:
+        dynamics = pd.DataFrame(columns=[
+            "date", "activity_group", "cadence_spm", "ground_contact_time_ms",
+            "vertical_oscillation_cm", "vertical_ratio_pct",
+            "stride_length_m", "running_power_w"
+        ])
 
+    return activities, plan, health, sleep, load, dynamics
+
+activities, plan, health, sleep, load, dynamics = load_data()
+
+# -----------------------
+# Setup
+# -----------------------
 races = pd.DataFrame([
     {"Race": "Korat X Trail 50K", "Date": "2026-08-23", "Priority": "Build"},
     {"Race": "Phuket Trail 75K", "Date": "2026-09-12", "Priority": "Build"},
@@ -30,16 +43,19 @@ races["Date"] = pd.to_datetime(races["Date"])
 races["Days to go"] = (races["Date"].dt.date - date.today()).apply(lambda x: x.days)
 
 st.title("🏔️ Chut's Ultra Trail Command Center")
-st.caption("Version 3.0: activity insights, KC tracker, improvement %, detailed race readiness, recovery guidance, and AI coaching.")
+st.caption("Version 3.1: Pattana readiness, Running Lab, KC dynamics, DD/MM/YYYY dates, and detailed race readiness.")
 st.sidebar.header("Navigation")
 page = st.sidebar.radio(
     "Go to",
-    ["Home", "Training Plan", "Activities", "KC Tracker", "Recovery", "Race Readiness", "AI Coach"]
+    ["Home", "Training Plan", "Activities", "KC Tracker", "Running Lab", "Recovery", "Race Readiness", "AI Coach"]
 )
 
 # -----------------------
 # Helpers
 # -----------------------
+def fmt_date_series(series):
+    return pd.to_datetime(series).dt.strftime("%d/%m/%Y")
+
 def classify_activity(row):
     sport = str(row.get("sport", ""))
     name = str(row.get("activity_name", "")).lower()
@@ -71,7 +87,6 @@ def activity_comment(row):
     group = row.get("activity_group", "")
     dist = row.get("distance_km", 0)
     ascent = row.get("ascent_m", 0)
-    avg_hr = row.get("avg_hr", None)
 
     if group == "KC/Trail":
         if ascent >= 700:
@@ -104,6 +119,12 @@ def mean_last(df, col, n=7):
     if s.empty:
         return None
     return float(s[col].mean())
+
+def pct(value):
+    try:
+        return max(0, min(100, round(float(value), 1)))
+    except Exception:
+        return 0
 
 def recovery_assessment(sleep_avg, sleep_latest, hrv_avg, hrv_latest, load_latest, acwr_latest, load_status):
     notes = []
@@ -163,13 +184,7 @@ def recovery_assessment(sleep_avg, sleep_latest, hrv_avg, hrv_latest, load_lates
 
     return headline, notes, guidelines
 
-def pct(value):
-    try:
-        return max(0, min(100, round(float(value), 1)))
-    except Exception:
-        return 0
-
-def readiness_scores(activities_df, plan_df, sleep_avg7, hrv_avg7, load_status):
+def pocari_readiness_scores(activities_df, plan_df, sleep_avg7, hrv_avg7, load_status):
     if activities_df.empty:
         return {
             "Fitness": 10, "Recovery": 50, "Consistency": 10,
@@ -177,10 +192,7 @@ def readiness_scores(activities_df, plan_df, sleep_avg7, hrv_avg7, load_status):
         }
 
     run_df = activities_df[activities_df["sport"].str.contains("Run", case=False, na=False)].copy()
-    kc_df = activities_df[activities_df["activity_group"] == "KC/Trail"].copy() if "activity_group" in activities_df.columns else pd.DataFrame()
-
     total_hours = activities_df["duration_min"].sum() / 60 if "duration_min" in activities_df.columns else 0
-    total_run_km = run_df["distance_km"].sum() if not run_df.empty else 0
     longest_run = run_df["distance_km"].max() if not run_df.empty else 0
     total_ascent = activities_df["ascent_m"].sum() if "ascent_m" in activities_df.columns else 0
 
@@ -218,20 +230,126 @@ def readiness_scores(activities_df, plan_df, sleep_avg7, hrv_avg7, load_status):
         "Overall": overall
     }
 
+def pattana_readiness_scores(activities_df, sleep_avg7, hrv_avg7, load_status):
+    if activities_df.empty:
+        return {
+            "Swim": 0, "Bike": 0, "Run": 0,
+            "Brick": 0, "Recovery": 50, "Overall": 10
+        }
+
+    df = activities_df.copy()
+    swim_km = df[df["activity_group"] == "Swimming"]["distance_km"].sum()
+    bike_km = df[df["activity_group"] == "Cycling"]["distance_km"].sum()
+    run_km = df[df["activity_group"].isin(["Running", "KC/Trail"])]["distance_km"].sum()
+
+    swim = pct((swim_km / 5) * 100)
+    bike = pct((bike_km / 120) * 100)
+    run = pct((run_km / 80) * 100)
+
+    # Brick proxy: cycling and running within the same date.
+    brick_days = 0
+    if "date" in df.columns:
+        tmp = df.copy()
+        tmp["day"] = pd.to_datetime(tmp["date"]).dt.date
+        for _, g in tmp.groupby("day"):
+            groups = set(g["activity_group"])
+            if "Cycling" in groups and ("Running" in groups or "KC/Trail" in groups):
+                brick_days += 1
+    brick = pct((brick_days / 4) * 100)
+
+    recovery = 50
+    if sleep_avg7 is not None:
+        recovery += 15 if sleep_avg7 >= 7 else 5 if sleep_avg7 >= 6 else -10
+    if hrv_avg7 is not None:
+        recovery += 10
+    if load_status:
+        recovery += 10 if str(load_status).upper() in ["OPTIMAL", "MAINTAINING", "PRODUCTIVE"] else -5
+    recovery = pct(recovery)
+
+    overall = pct(
+        swim * 0.25 +
+        bike * 0.25 +
+        run * 0.20 +
+        brick * 0.15 +
+        recovery * 0.15
+    )
+
+    return {
+        "Swim": swim,
+        "Bike": bike,
+        "Run": run,
+        "Brick": brick,
+        "Recovery": recovery,
+        "Overall": overall
+    }
+
+def dynamics_assessment(row):
+    notes = []
+
+    cadence = row.get("cadence_spm", None)
+    gct = row.get("ground_contact_time_ms", None)
+    vo = row.get("vertical_oscillation_cm", None)
+    vr = row.get("vertical_ratio_pct", None)
+    power = row.get("running_power_w", None)
+
+    if cadence is not None and pd.notna(cadence):
+        if cadence < 145:
+            notes.append("Cadence is low, which is normal for steep trail climbing or hiking sections.")
+        elif cadence <= 180:
+            notes.append("Cadence is in a normal running range.")
+        else:
+            notes.append("Cadence is high, often seen during faster running or short stride turnover.")
+
+    if gct is not None and pd.notna(gct):
+        if gct <= 260:
+            notes.append("Ground contact time is quick.")
+        elif gct <= 310:
+            notes.append("Ground contact time is reasonable, especially for trail terrain.")
+        else:
+            notes.append("Ground contact time is high; this may reflect climbing, fatigue, or hiking sections.")
+
+    if vo is not None and pd.notna(vo):
+        if vo <= 8:
+            notes.append("Vertical oscillation is efficient; not much wasted bounce.")
+        elif vo <= 10:
+            notes.append("Vertical oscillation is acceptable.")
+        else:
+            notes.append("Vertical oscillation is high; improving cadence and hip strength may help.")
+
+    if vr is not None and pd.notna(vr):
+        if vr <= 9:
+            notes.append("Vertical ratio looks efficient.")
+        elif vr <= 11:
+            notes.append("Vertical ratio is acceptable.")
+        else:
+            notes.append("Vertical ratio is high; more forward movement and less bounce may improve economy.")
+
+    if power is not None and pd.notna(power):
+        notes.append("Running power gives us a useful benchmark for comparing future KC and hill efforts.")
+
+    if not notes:
+        notes.append("No running dynamics data found for this activity yet.")
+
+    return " ".join(notes)
+
 SPORT_COLORS = {
-    "Running": "#2ECC71",     # green
-    "Cycling": "#FF69B4",     # pink
-    "Swimming": "#FFD700",    # yellow
-    "KC/Trail": "#8E44AD"     # purple
+    "Running": "#2ECC71",
+    "Cycling": "#FF69B4",
+    "Swimming": "#FFD700",
+    "KC/Trail": "#8E44AD"
 }
 
-# Prepare activity display groups
+# Prepare data
 if not activities.empty:
     activities["activity_group"] = activities.apply(classify_activity, axis=1)
     activities["ai_comment"] = activities.apply(activity_comment, axis=1)
 else:
     activities["activity_group"] = []
     activities["ai_comment"] = []
+
+if not dynamics.empty:
+    dynamics["date_display"] = fmt_date_series(dynamics["date"])
+    dynamics["ai_dynamics_comment"] = dynamics.apply(dynamics_assessment, axis=1)
 
 run_activities = activities[activities["sport"].str.contains("Run", case=False, na=False)] if not activities.empty else pd.DataFrame()
 run_km = run_activities["distance_km"].sum() if not run_activities.empty else 0
@@ -243,21 +361,21 @@ adherence = round(completed / planned_sessions * 100, 1) if planned_sessions els
 
 plan_display_cols = ["date", "planned_session", "type", "planned_run_km", "actual_km", "status"]
 plan_display = plan[[c for c in plan_display_cols if c in plan.columns]].copy()
-plan_display["date"] = plan_display["date"].dt.strftime("%d %b %Y")
+if not plan_display.empty and "date" in plan_display.columns:
+    plan_display["date"] = fmt_date_series(plan_display["date"])
 
 sleep_latest = latest_non_null(sleep, "sleep_hours")
 sleep_avg7 = mean_last(sleep, "sleep_hours", 7)
-sleep_score_avg7 = mean_last(sleep, "sleep_score", 7)
 hrv_latest = latest_non_null(health, "HRV")
 hrv_avg7 = mean_last(health, "HRV", 7)
-hrv_status = latest_non_null(health, "HRV_status")
 load_latest = latest_non_null(load, "acute_load")
 chronic_latest = latest_non_null(load, "chronic_load")
 acwr_latest = latest_non_null(load, "acwr")
 load_status = latest_non_null(load, "load_status")
 headline, recovery_notes, recovery_guidelines = recovery_assessment(sleep_avg7, sleep_latest, hrv_avg7, hrv_latest, load_latest, acwr_latest, load_status)
 
-scores = readiness_scores(activities, plan, sleep_avg7, hrv_avg7, load_status)
+pocari_scores = pocari_readiness_scores(activities, plan, sleep_avg7, hrv_avg7, load_status)
+pattana_scores = pattana_readiness_scores(activities, sleep_avg7, hrv_avg7, load_status)
 
 # -----------------------
 # Pages
@@ -267,14 +385,16 @@ if page == "Home":
     c1.metric("June running", f"{run_km:.1f} km")
     c2.metric("Training time", f"{training_hours:.1f} h")
     c3.metric("Longest run", f"{longest_run:.1f} km")
-    c4.metric("Plan adherence", f"{adherence}%")
-    c5.metric("Pocari readiness", f"{scores['Overall']}%")
+    c4.metric("Pocari", f"{pocari_scores['Overall']}%")
+    c5.metric("Pattana Tri", f"{pattana_scores['Overall']}%")
 
     st.subheader("1. Training Plan vs Actual")
     st.dataframe(plan_display, use_container_width=True)
 
     st.subheader("2. Race Countdown")
-    st.dataframe(races[["Date", "Race", "Priority", "Days to go"]], use_container_width=True)
+    races_display = races[["Date", "Race", "Priority", "Days to go"]].copy()
+    races_display["Date"] = fmt_date_series(races_display["Date"])
+    st.dataframe(races_display, use_container_width=True)
 
     st.subheader("3. June Training Mix")
     if not activities.empty:
@@ -291,12 +411,7 @@ if page == "Home":
             color="activity_group",
             color_discrete_map=SPORT_COLORS
         )
-        fig.update_layout(
-            legend_title_text="Activity",
-            xaxis_title="Activity",
-            yaxis_title="Distance (km)",
-            plot_bgcolor="rgba(0,0,0,0)"
-        )
+        fig.update_layout(legend_title_text="Activity", xaxis_title="Activity", yaxis_title="Distance (km)")
         st.plotly_chart(fig, use_container_width=True)
 
 elif page == "Training Plan":
@@ -320,7 +435,6 @@ elif page == "Activities":
     st.header("Garmin Activities")
 
     if not activities.empty:
-        st.subheader("Activities by Distance and Duration")
         fig = px.scatter(
             activities,
             x="date",
@@ -330,7 +444,7 @@ elif page == "Activities":
             color_discrete_map=SPORT_COLORS,
             hover_name="activity_group",
             hover_data={
-                "date": True,
+                "date": "|%d/%m/%Y",
                 "sport": True,
                 "distance_km": ":.2f",
                 "duration_min": ":.1f",
@@ -342,27 +456,19 @@ elif page == "Activities":
             },
             title="Activities by Distance and Duration"
         )
-
-        fig.update_layout(
-            legend_title_text="Activity",
-            xaxis_title="Date",
-            yaxis_title="Distance (km)",
-            plot_bgcolor="rgba(0,0,0,0)"
-        )
-
+        fig.update_layout(legend_title_text="Activity", xaxis_title="Date", yaxis_title="Distance (km)")
         st.plotly_chart(fig, use_container_width=True)
 
         st.subheader("Activity Details")
-        detail_cols = [
-            "date", "activity_group", "sport", "distance_km", "duration_min",
-            "avg_hr", "ascent_m", "avg_pace_min_km", "ai_comment"
-        ]
+        detail_cols = ["date", "activity_group", "sport", "distance_km", "duration_min", "avg_hr", "ascent_m", "avg_pace_min_km", "ai_comment"]
         detail_cols = [c for c in detail_cols if c in activities.columns]
-        st.dataframe(activities[detail_cols].sort_values("date", ascending=False), use_container_width=True)
+        details = activities[detail_cols].sort_values("date", ascending=False).copy()
+        details["date"] = fmt_date_series(details["date"])
+        st.dataframe(details, use_container_width=True)
 
 elif page == "KC Tracker":
     st.header("KC / Trail Tracker")
-    st.caption("This page compares hill and trail sessions, especially Khao Chalak. Improvement % is calculated versus your first KC/Trail benchmark.")
+    st.caption("Compares hill/trail sessions. Improvement % is calculated versus your first KC/Trail benchmark.")
 
     if activities.empty:
         st.info("No activities loaded yet.")
@@ -370,7 +476,7 @@ elif page == "KC Tracker":
         kc = activities[activities["activity_group"] == "KC/Trail"].copy()
 
         if kc.empty:
-            st.info("No KC/Trail sessions detected yet. KC/Trail is detected by name or runs with 300m+ ascent.")
+            st.info("No KC/Trail sessions detected yet.")
         else:
             kc = kc.sort_values("date").copy()
             kc["pace_min_per_km"] = kc["duration_min"] / kc["distance_km"]
@@ -390,33 +496,60 @@ elif page == "KC Tracker":
             c4.metric("Climb improvement", f"{latest['climb_improvement_%']:.1f}%")
 
             st.subheader("KC Performance Trend")
-            fig = px.line(
-                kc,
-                x="date",
-                y=["pace_min_per_km", "vertical_m_per_hour"],
-                markers=True,
-                title="KC Pace and Climbing Trend"
-            )
+            fig = px.line(kc, x="date", y=["pace_min_per_km", "vertical_m_per_hour"], markers=True, title="KC Pace and Climbing Trend")
             st.plotly_chart(fig, use_container_width=True)
 
             st.subheader("Improvement vs First KC/Trail Session")
-            fig2 = px.bar(
-                kc,
-                x="date",
-                y=["pace_improvement_%", "climb_improvement_%"],
-                barmode="group",
-                title="Improvement % from Baseline"
-            )
+            fig2 = px.bar(kc, x="date", y=["pace_improvement_%", "climb_improvement_%"], barmode="group", title="Improvement % from Baseline")
             st.plotly_chart(fig2, use_container_width=True)
 
+            if not dynamics.empty:
+                st.subheader("KC Running Dynamics")
+                dyn_cols = ["date", "cadence_spm", "ground_contact_time_ms", "vertical_oscillation_cm", "vertical_ratio_pct", "stride_length_m", "running_power_w", "ai_dynamics_comment"]
+                dyn_cols = [c for c in dyn_cols if c in dynamics.columns]
+                dyn = dynamics[dyn_cols].copy()
+                if "date" in dyn.columns:
+                    dyn["date"] = fmt_date_series(dyn["date"])
+                st.dataframe(dyn, use_container_width=True)
+
             st.subheader("KC Session History")
-            kc_cols = [
-                "date", "distance_km", "duration_min", "ascent_m", "avg_hr",
-                "pace_min_per_km", "vertical_m_per_hour",
-                "pace_improvement_%", "climb_improvement_%", "ai_comment"
-            ]
+            kc_cols = ["date", "distance_km", "duration_min", "ascent_m", "avg_hr", "pace_min_per_km", "vertical_m_per_hour", "pace_improvement_%", "climb_improvement_%", "ai_comment"]
             kc_cols = [c for c in kc_cols if c in kc.columns]
-            st.dataframe(kc[kc_cols].sort_values("date", ascending=False), use_container_width=True)
+            kc_display = kc[kc_cols].sort_values("date", ascending=False).copy()
+            kc_display["date"] = fmt_date_series(kc_display["date"])
+            st.dataframe(kc_display, use_container_width=True)
+
+elif page == "Running Lab":
+    st.header("🧪 Running Lab")
+    st.caption("This page explains Garmin running mechanics data in plain English.")
+
+    if dynamics.empty:
+        st.info("No running dynamics CSV found yet. Add running_dynamics_parsed.csv to GitHub to activate this page.")
+    else:
+        latest = dynamics.sort_values("date").iloc[-1]
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Cadence", f"{latest.get('cadence_spm', 0):.0f} spm")
+        c2.metric("GCT", f"{latest.get('ground_contact_time_ms', 0):.0f} ms")
+        c3.metric("Running Power", f"{latest.get('running_power_w', 0):.0f} W")
+
+        c4, c5, c6 = st.columns(3)
+        c4.metric("Vertical Oscillation", f"{latest.get('vertical_oscillation_cm', 0):.1f} cm")
+        c5.metric("Vertical Ratio", f"{latest.get('vertical_ratio_pct', 0):.1f}%")
+        c6.metric("Stride Length", f"{latest.get('stride_length_m', 0):.2f} m")
+
+        st.subheader("AI Mechanics Assessment")
+        st.write(latest.get("ai_dynamics_comment", "No assessment available."))
+
+        st.subheader("Running Dynamics History")
+        dyn_display = dynamics.copy()
+        dyn_display["date"] = fmt_date_series(dyn_display["date"])
+        st.dataframe(dyn_display, use_container_width=True)
+
+        st.subheader("Trends")
+        trend_cols = [c for c in ["cadence_spm", "ground_contact_time_ms", "vertical_oscillation_cm", "running_power_w"] if c in dynamics.columns]
+        if trend_cols:
+            fig = px.line(dynamics, x="date", y=trend_cols, markers=True, title="Running Dynamics Trend")
+            st.plotly_chart(fig, use_container_width=True)
 
 elif page == "Recovery":
     st.header("Recovery: AI Insight + Guidelines")
@@ -458,77 +591,85 @@ elif page == "Recovery":
         st.subheader("Garmin Training Load")
         fig3 = px.line(load, x="date", y=["acute_load", "chronic_load"], title="Acute vs Chronic Training Load")
         st.plotly_chart(fig3, use_container_width=True)
-        st.dataframe(load.sort_values("date", ascending=False), use_container_width=True)
+        load_display = load.sort_values("date", ascending=False).copy()
+        load_display["date"] = fmt_date_series(load_display["date"])
+        st.dataframe(load_display, use_container_width=True)
 
 elif page == "Race Readiness":
     st.header("Race Readiness")
 
-    score_df = pd.DataFrame([
-        {"Aspect": "Fitness", "Readiness": scores["Fitness"], "What it means": "Total training time and aerobic base."},
-        {"Aspect": "Recovery", "Readiness": scores["Recovery"], "What it means": "Sleep, HRV, and load balance."},
-        {"Aspect": "Consistency", "Readiness": scores["Consistency"], "What it means": "Training plan adherence."},
-        {"Aspect": "Elevation Prep", "Readiness": scores["Elevation Prep"], "What it means": "Climbing and trail exposure."},
-        {"Aspect": "Long Runs", "Readiness": scores["Long Runs"], "What it means": "Longest run and endurance durability."},
-    ])
+    tab1, tab2 = st.tabs(["🏔 Pocari 100K", "🏊🚴🏃 Pattana Triathlon"])
 
-    c1, c2 = st.columns([1, 2])
-    c1.metric("Pocari 100K Overall", f"{scores['Overall']}%")
-    c2.progress(scores["Overall"] / 100)
+    with tab1:
+        score_df = pd.DataFrame([
+            {"Aspect": "Fitness", "Readiness": pocari_scores["Fitness"], "What it means": "Total training time and aerobic base."},
+            {"Aspect": "Recovery", "Readiness": pocari_scores["Recovery"], "What it means": "Sleep, HRV, and load balance."},
+            {"Aspect": "Consistency", "Readiness": pocari_scores["Consistency"], "What it means": "Training plan adherence."},
+            {"Aspect": "Elevation Prep", "Readiness": pocari_scores["Elevation Prep"], "What it means": "Climbing and trail exposure."},
+            {"Aspect": "Long Runs", "Readiness": pocari_scores["Long Runs"], "What it means": "Longest run and endurance durability."},
+        ])
 
-    fig = px.bar(
-        score_df,
-        x="Aspect",
-        y="Readiness",
-        color="Aspect",
-        range_y=[0, 100],
-        text="Readiness",
-        title="Pocari 100K Readiness Breakdown"
-    )
-    st.plotly_chart(fig, use_container_width=True)
+        c1, c2 = st.columns([1, 2])
+        c1.metric("Pocari 100K Overall", f"{pocari_scores['Overall']}%")
+        c2.progress(pocari_scores["Overall"] / 100)
 
-    st.subheader("Breakdown")
-    st.dataframe(score_df, use_container_width=True)
+        fig = px.bar(score_df, x="Aspect", y="Readiness", color="Aspect", range_y=[0, 100], text="Readiness", title="Pocari 100K Readiness Breakdown")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(score_df, use_container_width=True)
 
-    st.subheader("AI Readiness Assessment")
-    weakest = score_df.sort_values("Readiness").iloc[0]
-    strongest = score_df.sort_values("Readiness", ascending=False).iloc[0]
-    st.write(f"**Strongest area:** {strongest['Aspect']} ({strongest['Readiness']}%).")
-    st.write(f"**Biggest limiter right now:** {weakest['Aspect']} ({weakest['Readiness']}%).")
+        weakest = score_df.sort_values("Readiness").iloc[0]
+        strongest = score_df.sort_values("Readiness", ascending=False).iloc[0]
+        st.write(f"**Strongest area:** {strongest['Aspect']} ({strongest['Readiness']}%).")
+        st.write(f"**Biggest limiter right now:** {weakest['Aspect']} ({weakest['Readiness']}%).")
 
-    if weakest["Aspect"] == "Elevation Prep":
-        st.warning("Main focus: build KC/trail exposure gradually. This is probably the most important limiter for your ultra season.")
-    elif weakest["Aspect"] == "Long Runs":
-        st.warning("Main focus: build long-run durability. Do not jump suddenly; progress the long run safely.")
-    elif weakest["Aspect"] == "Recovery":
-        st.warning("Main focus: sleep and recovery. Fitness gains will be limited if recovery is poor.")
-    elif weakest["Aspect"] == "Consistency":
-        st.warning("Main focus: complete the plan consistently. Consistency beats heroic single workouts.")
-    else:
-        st.warning("Main focus: increase aerobic volume gradually through easy sessions and cross-training.")
+    with tab2:
+        tri_df = pd.DataFrame([
+            {"Aspect": "Swim", "Readiness": pattana_scores["Swim"], "What it means": "Swim volume and comfort."},
+            {"Aspect": "Bike", "Readiness": pattana_scores["Bike"], "What it means": "Cycling volume and bike fitness."},
+            {"Aspect": "Run", "Readiness": pattana_scores["Run"], "What it means": "Run fitness carrying into the triathlon."},
+            {"Aspect": "Brick", "Readiness": pattana_scores["Brick"], "What it means": "Bike-to-run transition practice."},
+            {"Aspect": "Recovery", "Readiness": pattana_scores["Recovery"], "What it means": "Sleep, HRV, and load balance."},
+        ])
 
-    st.caption("This is a starter readiness model. It will become more accurate as you upload July and August data.")
+        c1, c2 = st.columns([1, 2])
+        c1.metric("Pattana Overall", f"{pattana_scores['Overall']}%")
+        c2.progress(pattana_scores["Overall"] / 100)
+
+        fig = px.bar(tri_df, x="Aspect", y="Readiness", color="Aspect", range_y=[0, 100], text="Readiness", title="Pattana Triathlon Readiness Breakdown")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(tri_df, use_container_width=True)
+
+        weakest_tri = tri_df.sort_values("Readiness").iloc[0]
+        st.write(f"**Biggest limiter for Pattana:** {weakest_tri['Aspect']} ({weakest_tri['Readiness']}%).")
+        if weakest_tri["Aspect"] == "Brick":
+            st.warning("Main focus: practice bike-to-run transitions. Even short brick runs after Skylane will help.")
+        elif weakest_tri["Aspect"] == "Swim":
+            st.warning("Main focus: build swim consistency without exhausting your trail training.")
+        elif weakest_tri["Aspect"] == "Bike":
+            st.warning("Main focus: maintain bike volume through Skylane sessions.")
+        elif weakest_tri["Aspect"] == "Run":
+            st.warning("Main focus: keep run consistency while protecting recovery.")
+        else:
+            st.warning("Main focus: protect recovery so triathlon training does not interfere with Pocari build.")
 
 elif page == "AI Coach":
     st.header("AI Coach & Assessment")
     st.success("Strength: You have a clear race calendar and a structured build toward Pocari 100K.")
+    st.info("Recommendation: Upload each FIT file after training. The dashboard will update plan-vs-actual, KC tracker, running dynamics, and readiness.")
 
-    if scores["Elevation Prep"] < 40:
-        st.warning("Watchlist: Elevation prep is still low for a 100K trail season. KC sessions are very valuable.")
-    elif scores["Long Runs"] < 50:
-        st.warning("Watchlist: Long-run durability still needs development before Korat and Phuket.")
-    else:
-        st.warning("Watchlist: Manage recovery carefully as the training block builds.")
-
-    st.info("Recommendation: Upload each FIT file after training. The dashboard will update plan-vs-actual, adherence, KC tracker, and readiness.")
     st.subheader("Recovery Coach Snapshot")
     st.write(headline)
     for guide in recovery_guidelines[:3]:
         st.write(f"- {guide}")
 
     st.subheader("Pocari Coach Snapshot")
-    st.write(f"- Overall Pocari readiness: **{scores['Overall']}%**")
-    st.write(f"- Fitness: **{scores['Fitness']}%**")
-    st.write(f"- Recovery: **{scores['Recovery']}%**")
-    st.write(f"- Consistency: **{scores['Consistency']}%**")
-    st.write(f"- Elevation prep: **{scores['Elevation Prep']}%**")
-    st.write(f"- Long runs: **{scores['Long Runs']}%**")
+    st.write(f"- Overall Pocari readiness: **{pocari_scores['Overall']}%**")
+    st.write(f"- Elevation prep: **{pocari_scores['Elevation Prep']}%**")
+    st.write(f"- Long runs: **{pocari_scores['Long Runs']}%**")
+
+    st.subheader("Pattana Tri Coach Snapshot")
+    st.write(f"- Overall Pattana readiness: **{pattana_scores['Overall']}%**")
+    st.write(f"- Swim: **{pattana_scores['Swim']}%**")
+    st.write(f"- Bike: **{pattana_scores['Bike']}%**")
+    st.write(f"- Run: **{pattana_scores['Run']}%**")
+    st.write(f"- Brick: **{pattana_scores['Brick']}%**")
