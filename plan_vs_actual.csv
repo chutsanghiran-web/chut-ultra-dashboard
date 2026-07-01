@@ -1,12 +1,12 @@
 date,planned_session,type,planned_run_km,actual_km,actual_sports,status
 2026-06-23,10k,Run,10,,,Missed - Illness
 2026-06-24,5k easy,Run,5,,,Missed - Illness
-2026-06-25,Rest,Rest,0,0,Rest,Completed
+2026-06-25,Rest,Rest,0,0.0,Rest,Completed
 2026-06-26,Happy Healthy Sky Lane 2 laps + 3k run,Brick,3,29.45,Cycling 27.44 km + Running 2.01 km,Modified - Return from cold
-2026-06-27,12k long run,Run,12,0,Rest / illness recovery,Skipped - Recovery
-2026-06-28,Swim,Swim,0,0,Rest / illness recovery,Skipped - Recovery
+2026-06-27,12k long run,Run,12,0.0,Rest / illness recovery,Skipped - Recovery
+2026-06-28,Swim,Swim,0,0.0,Rest / illness recovery,Skipped - Recovery
 2026-06-29,Khao Chalak 3 laps,Trail/KC,0,10.01,KC 2 laps; 791 m gain,Modified - Smart progression
-2026-06-30,Rest,Rest,0,,,Upcoming
+2026-06-30,Rest,Rest,0,7.52,Road run 7.52 km; elevation corrected,Extra - Road run
 2026-07-01,Rest,Rest,0,,,Upcoming
 2026-07-02,10k,Run,10,,,Upcoming
 2026-07-03,Sky Lane 2 laps + 3k run,Brick,3,,,Upcoming
